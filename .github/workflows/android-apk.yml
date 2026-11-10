@@ -1,0 +1,90 @@
+name: Build Aura Browser APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  ANDROID_PLATFORM: android-35
+  ANDROID_NDK_VERSION: 27.2.12479018
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;35.0.0" "ndk;${ANDROID_NDK_VERSION}"
+          yes | sdkmanager --licenses >/dev/null
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # cargo-mobile2 generates the Android Gradle project and WryActivity/JNI glue.
+      - name: Install cargo-mobile2
+        run: cargo install --git https://github.com/tauri-apps/cargo-mobile2 --locked
+
+      - name: Generate Wry Android scaffold
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/aura-scaffold"
+          cd "$RUNNER_TEMP/aura-scaffold"
+          printf 'aura_browser\nAura Browser\ncom.aura\n6\n' | cargo mobile init
+          cp -a android "$GITHUB_WORKSPACE/"
+          cp -a mobile.toml "$GITHUB_WORKSPACE/"
+          if [ -f build.rs ]; then cp build.rs "$GITHUB_WORKSPACE/"; fi
+          if [ -d .cargo ]; then cp -a .cargo "$GITHUB_WORKSPACE/"; fi
+          if [ -f Cargo.toml ]; then cp Cargo.toml "$GITHUB_WORKSPACE/Cargo.mobile-template.toml"; fi
+
+      - name: Build ARM64 release APK
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          WRY_ANDROID_PACKAGE: com.aura.aura_browser
+          WRY_ANDROID_LIBRARY: aura_browser
+          WRY_ANDROID_KOTLIN_FILES_OUT_DIR: android/app/src/main/java/com/aura/aura_browser
+        run: cargo android build --release
+
+      - name: Locate APK
+        id: apk
+        shell: bash
+        run: |
+          APK="$(find . -type f -path '*/build/outputs/apk/*/*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo 'No APK found. Build output:'
+            find . -maxdepth 7 -type f | grep -E '(apk|gradle|\.log)$' | head -200 || true
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$APK" dist/Aura-Browser-arm64-debug-or-release.apk
+          echo "path=dist/Aura-Browser-arm64-debug-or-release.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aura-Browser-Android-APK
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 14
